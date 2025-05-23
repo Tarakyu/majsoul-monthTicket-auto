@@ -2,7 +2,7 @@ name: Login to Majsoul
 
 on:
   schedule:
-    - cron: '5 21 * * *'  # 21:05 UTC time (6:05 a.m. Korean time)
+    - cron: '*/5 * * * *'  # 매 5분마다
   workflow_dispatch:
 
 jobs:
@@ -22,11 +22,16 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
+    - name: Restore credentials.json
+      run: |
+        echo "${{ secrets.CREDENTIALS_BASE64 }}" | base64 -d > credentials.json
+
     - name: Execute main.py
       run: python main.py
       env:
         UID: ${{ secrets.UID }}
         TOKEN: ${{ secrets.TOKEN }}
+        TOURNAMENT_ID: ${{ secrets.TOURNAMENT_ID }}
 
     - name: Update Keep-Alive File
       run: |
