@@ -173,10 +173,6 @@ def get_existing_uuids(sheet):
     uuid_col = sheet.col_values(20)  # uuid는 20번째 열 (패보 링크)
     return set(uuid_col[1:])  # 첫 줄은 헤더이므로 제외
 def parse_game_record(record: dict) -> list:
-    from datetime import datetime
-
-    def format_time(ts):
-        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
 
     uuid = record["uuid"]
     start_time = format_time(int(record["startTime"]))
