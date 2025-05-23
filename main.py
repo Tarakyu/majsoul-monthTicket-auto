@@ -132,11 +132,10 @@ async def login(lobby, version_to_force, accessTokenFromPassport):
 
     # await getMonthlyTicket(lobby)
 
-    req = pb.ReqFetchCustomizedContestGameRecords(unique_id=TOURNAMENT_ID,last_index=4)
+    req = pb.ReqFetchCustomizedContestGameRecords(unique_id=TOURNAMENT_ID)
     res = await lobby.fetch_customized_contest_game_records(req)
     res_dict = MessageToDict(res)
 
-    print(res_dict.get("nextIndex"))
     records = res_dict.get("recordList", [])
 
     sheet = connect_to_sheet()
