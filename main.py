@@ -6,6 +6,7 @@ import json
 import aiohttp
 import os
 import gspread
+import pytz
 
 from datetime import datetime
 from dotenv import load_dotenv
@@ -165,7 +166,8 @@ def connect_to_sheet():
     return sheet
 
 def format_time(ts):
-    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+    KST = pytz.timezone('Asia/Seoul')
+    return datetime.fromtimestamp(ts, tz=pytz.utc).astimezone(KST).strftime("%Y-%m-%d %H:%M")
 
 def get_existing_uuids(sheet):
     uuid_col = sheet.col_values(20)  # uuid는 20번째 열 (패보 링크)
