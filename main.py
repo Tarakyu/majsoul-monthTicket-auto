@@ -162,7 +162,7 @@ def connect_to_sheet():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
     client = gspread.authorize(creds)
-    sheet = client.open("카카오 마작부").worksheet("데이터")
+    sheet = client.open("카일색 대회전 기록지").worksheet("데이터")
     return sheet
 
 def format_time(ts):
