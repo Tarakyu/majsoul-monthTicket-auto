@@ -133,7 +133,7 @@ async def login(lobby, version_to_force, accessTokenFromPassport):
 
     # await getMonthlyTicket(lobby)
 
-    req = pb.ReqFetchCustomizedContestGameRecords(unique_id=TOURNAMENT_ID)
+    req = pb.ReqFetchCustomizedContestGameRecords(unique_id=TOURNAMENT_ID, last_index=20)
     res = await lobby.fetch_customized_contest_game_records(req)
     res_dict = MessageToDict(res)
 
@@ -169,6 +169,8 @@ async def login(lobby, version_to_force, accessTokenFromPassport):
                 seat_stats.get("ron", 0),
                 seat_stats.get("houju", 0),
                 seat_stats.get("furo", 0),
+                seat_stats.get("dama", 0),
+                seat_stats.get("chase_riichi", 0),
             ]
             statistics_rows.append(row)
 
@@ -335,11 +337,15 @@ def analyze_game_log(log_json: dict) -> dict:
             "tsumo": set(),
             "houju": set(),
             "riichi": set(),
-            "furo": set()
+            "furo": set(),
+            "dama": set(),
+            "chase_riichi": set()
         } for seat in range(4)
     }
 
+    riichi_declared_in_kyoku = set()  # 현재 국에서 누가 리치했는지 저장
     prev_action = None
+
     for action in actions:
         # 1. 국 종료 (다음 국으로 이동)
         if (
@@ -348,10 +354,11 @@ def analyze_game_log(log_json: dict) -> dict:
             (action["result"].startswith("Cg4ub") or action["result"].startswith("ChAub"))
         ):
             current_kyoku += 1
+            riichi_declared_in_kyoku.clear()
             prev_action = None
             continue
 
-        # 2. 론 (cpg.type == 9)
+        # 2. 론
         if (
             action.get("type") == 2 and
             action.get("userInput", {}).get("type") == 3 and
@@ -362,7 +369,11 @@ def analyze_game_log(log_json: dict) -> dict:
             stats[attacker]["ron"].add(current_kyoku)
             stats[defender]["houju"].add(current_kyoku)
 
-        # 3. 쯔모 (operation.type == 8)
+            # 다마텐: 리치 안 했고, 후로도 안 했으면
+            if current_kyoku not in stats[attacker]["riichi"] and current_kyoku not in stats[attacker]["furo"]:
+                stats[attacker]["dama"].add(current_kyoku)
+
+        # 3. 쯔모
         if (
             action.get("type") == 2 and
             action.get("userInput", {}).get("operation", {}).get("type") == 8
@@ -370,15 +381,25 @@ def analyze_game_log(log_json: dict) -> dict:
             seat = action["userInput"].get("seat", 0)
             stats[seat]["tsumo"].add(current_kyoku)
 
-        # 4. 리치 (operation.type == 7)
+            # 다마텐 체크
+            if current_kyoku not in stats[seat]["riichi"] and current_kyoku not in stats[seat]["furo"]:
+                stats[seat]["dama"].add(current_kyoku)
+
+        # 4. 리치
         if (
             action.get("type") == 2 and
             action.get("userInput", {}).get("operation", {}).get("type") == 7
         ):
             seat = action["userInput"].get("seat", 0)
-            stats[seat]["riichi"].add(current_kyoku)
 
-        # 5. 후로 (cpg.type in [2, 3, 5])
+            # 추격 리치 조건: 이미 다른 사람이 리치한 경우
+            if any(other_seat != seat for other_seat in riichi_declared_in_kyoku):
+                stats[seat]["chase_riichi"].add(current_kyoku)
+
+            stats[seat]["riichi"].add(current_kyoku)
+            riichi_declared_in_kyoku.add(seat)
+
+        # 5. 후로
         if (
             action.get("type") == 2 and
             action.get("userInput", {}).get("type") == 3 and
@@ -387,7 +408,7 @@ def analyze_game_log(log_json: dict) -> dict:
             seat = action["userInput"].get("seat", 0)
             stats[seat]["furo"].add(current_kyoku)
 
-        if (action["type"]) != 1:
+        if action["type"] != 1:
             prev_action = action
 
     # 요약 결과
@@ -400,11 +421,14 @@ def analyze_game_log(log_json: dict) -> dict:
                 "houju": len(stats[seat]["houju"]),
                 "riichi": len(stats[seat]["riichi"]),
                 "furo": len(stats[seat]["furo"]),
-                "hora": len(stats[seat]["ron"] | stats[seat]["tsumo"])
+                "hora": len(stats[seat]["ron"] | stats[seat]["tsumo"]),
+                "dama": len(stats[seat]["dama"]),
+                "chase_riichi": len(stats[seat]["chase_riichi"])
             }
             for seat in range(4)
         }
     }
+
 
 if __name__ == "__main__":
     asyncio.run(main())

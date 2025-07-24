@@ -3,3 +3,4 @@
 .env
 __pycache__/
 credentials.json
+keep_alive.txt
