@@ -139,8 +139,9 @@ async def login(lobby, version_to_force, accessTokenFromPassport):
 
     records = res_dict.get("recordList", [])
 
-    sheet = connect_to_sheet()
-    existing_uuids = get_existing_uuids(sheet)
+    data_sheet = connect_to_data_sheet()
+    existing_uuids = get_existing_uuids(data_sheet)
+    statistics_sheet = connect_to_statistics_sheet()
 
     new_rows = []
     for record in records:
@@ -149,20 +150,49 @@ async def login(lobby, version_to_force, accessTokenFromPassport):
 
     new_rows.sort(key=lambda x: int(x[0]))
 
-    rows_to_append = [parse_game_record(r[1]) for r in new_rows]
+    rows_to_append = []
+    statistics_rows = []
+    for r in new_rows:
+        parsed_row, seat_map = parse_game_record(r[1])
+        rows_to_append.append(parsed_row)
+        statistics = await get_game_statistics(lobby, r[1]["uuid"], version_to_force)
+        
+        for seat in range(4):
+            seat_stats = statistics["players"].get(seat, {})
+            row = [
+                r[1]["uuid"],
+                seat_map[seat],
+                statistics["total_kyoku"],
+                seat_stats.get("riichi", 0),
+                seat_stats.get("hora", 0),
+                seat_stats.get("tsumo", 0),
+                seat_stats.get("ron", 0),
+                seat_stats.get("houju", 0),
+                seat_stats.get("furo", 0),
+            ]
+            statistics_rows.append(row)
+
 
     if rows_to_append:
-        sheet.append_rows(rows_to_append, value_input_option="USER_ENTERED")
+        data_sheet.append_rows(rows_to_append, value_input_option="USER_ENTERED")
+        statistics_sheet.append_rows(statistics_rows, value_input_option="USER_ENTERED")
 
     print(f"총 {len(new_rows)}개의 새로운 게임 기록이 추가되었습니다.")
 
     return True
 
-def connect_to_sheet():
+def connect_to_data_sheet():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
     client = gspread.authorize(creds)
-    sheet = client.open("카카오 마작부").worksheet("데이터")
+    sheet = client.open("카일색 대회전 기록지").worksheet("데이터")
+    return sheet
+
+def connect_to_statistics_sheet():
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+    client = gspread.authorize(creds)
+    sheet = client.open("카일색 대회전 기록지").worksheet("국 통계")
     return sheet
 
 def format_time(ts):
@@ -172,6 +202,7 @@ def format_time(ts):
 def get_existing_uuids(sheet):
     uuid_col = sheet.col_values(20)  # uuid는 20번째 열 (패보 링크)
     return set(uuid_col[1:])  # 첫 줄은 헤더이므로 제외
+
 def parse_game_record(record: dict) -> list:
 
     uuid = record["uuid"]
@@ -188,6 +219,7 @@ def parse_game_record(record: dict) -> list:
     players_without_seat = [p for p in accounts if "seat" not in p]
 
     row = [start_time, end_time, deleted]
+    seat_map = {}
 
     for p in results:
         seat = p.get("seat")
@@ -196,8 +228,10 @@ def parse_game_record(record: dict) -> list:
 
         if seat is not None and seat in players_by_seat:
             info = players_by_seat[seat]
+            seat_map[seat] = info.get("accountId", "")
         else:
             info = players_without_seat.pop(0) if players_without_seat else {}
+            seat_map[0] = info.get("accountId", "")
 
         row.extend([
             info.get("accountId", ""),
@@ -206,8 +240,12 @@ def parse_game_record(record: dict) -> list:
             round(total / 1000, 1)
         ])
 
+        
+
     row.append(uuid)
-    return row
+
+    
+    return row, seat_map
 
 
 async def getMonthlyTicket(lobby):
@@ -249,58 +287,6 @@ async def calculate_participants_statistics(lobby):
     with open("participants_statistics.txt", "w", encoding="utf-8") as f:
         f.write(final_output)
 
-async def load_and_process_game_log(lobby, uuid, version_to_force):
-    logging.info("Loading game log")
-
-    req = pb.ReqGameRecord()
-    req.game_uuid = uuid
-    req.client_version_string = f"web-{version_to_force}"
-    res = await lobby.fetch_game_record(req)
-    with open("game_record.txt", "w", encoding="utf-8") as f:
-        f.write(MessageToJson(res))
-
-    record_wrapper = pb.Wrapper()
-    record_wrapper.ParseFromString(res.data)
-
-    game_details = pb.GameDetailRecords()
-    game_details.ParseFromString(record_wrapper.data)
-
-    game_records_count = len(game_details.records)
-    logging.info("Found {} game records".format(game_records_count))
-
-    round_record_wrapper = pb.Wrapper()
-    is_show_new_round_record = False
-    is_show_discard_tile = False
-    is_show_deal_tile = False
-
-    with open("game_details.txt", "w", encoding="utf-8") as f:
-        f.write(MessageToJson(game_details))
-
-    for i in range(0, game_records_count):
-        round_record_wrapper.ParseFromString(game_details.records[i])
-
-        if round_record_wrapper.name == ".lq.RecordNewRound" and not is_show_new_round_record:
-            logging.info("Found record type = {}".format(round_record_wrapper.name))
-            round_data = pb.RecordNewRound()
-            round_data.ParseFromString(round_record_wrapper.data)
-            print_data_as_json(round_data, "RecordNewRound")
-            is_show_new_round_record = True
-
-        if round_record_wrapper.name == ".lq.RecordDiscardTile" and not is_show_discard_tile:
-            logging.info("Found record type = {}".format(round_record_wrapper.name))
-            discard_tile = pb.RecordDiscardTile()
-            discard_tile.ParseFromString(round_record_wrapper.data)
-            print_data_as_json(discard_tile, "RecordDiscardTile")
-            is_show_discard_tile = True
-
-        if round_record_wrapper.name == ".lq.RecordDealTile" and not is_show_deal_tile:
-            logging.info("Found record type = {}".format(round_record_wrapper.name))
-            deal_tile = pb.RecordDealTile()
-            deal_tile.ParseFromString(round_record_wrapper.data)
-            print_data_as_json(deal_tile, "RecordDealTile")
-            is_show_deal_tile = True
-
-    return res
 
 def parse_statistics(account_id: int, data: dict) -> str:
 
@@ -322,6 +308,103 @@ def parse_statistics(account_id: int, data: dict) -> str:
             else:
                 return f"{nickname}\n화료율: -\n방총률: -\n"
     return f"{nickname}\n데이터 없음\n"
+
+async def get_game_statistics(lobby, uuid, version_to_force):
+    req = pb.ReqGameRecord()
+    req.game_uuid = uuid
+    req.client_version_string = f"web-{version_to_force}"
+    res = await lobby.fetch_game_record(req)
+
+    record_wrapper = pb.Wrapper()
+    record_wrapper.ParseFromString(res.data)
+
+    game_details = pb.GameDetailRecords()
+    game_details.ParseFromString(record_wrapper.data)
+
+    result = analyze_game_log(MessageToDict(game_details))
+
+    return result
+
+def analyze_game_log(log_json: dict) -> dict:
+    actions = log_json.get("actions", [])
+
+    current_kyoku = 0
+    stats = {
+        seat: {
+            "ron": set(),
+            "tsumo": set(),
+            "houju": set(),
+            "riichi": set(),
+            "furo": set()
+        } for seat in range(4)
+    }
+
+    prev_action = None
+    for action in actions:
+        # 1. 국 종료 (다음 국으로 이동)
+        if (
+            action.get("type") == 1 and
+            isinstance(action.get("result"), str) and
+            (action["result"].startswith("Cg4ub") or action["result"].startswith("ChAub"))
+        ):
+            current_kyoku += 1
+            prev_action = None
+            continue
+
+        # 2. 론 (cpg.type == 9)
+        if (
+            action.get("type") == 2 and
+            action.get("userInput", {}).get("type") == 3 and
+            action["userInput"].get("cpg", {}).get("type") == 9
+        ):
+            attacker = action["userInput"].get("seat", 0)
+            defender = prev_action["userInput"].get("seat", 0) if prev_action else 0
+            stats[attacker]["ron"].add(current_kyoku)
+            stats[defender]["houju"].add(current_kyoku)
+
+        # 3. 쯔모 (operation.type == 8)
+        if (
+            action.get("type") == 2 and
+            action.get("userInput", {}).get("operation", {}).get("type") == 8
+        ):
+            seat = action["userInput"].get("seat", 0)
+            stats[seat]["tsumo"].add(current_kyoku)
+
+        # 4. 리치 (operation.type == 7)
+        if (
+            action.get("type") == 2 and
+            action.get("userInput", {}).get("operation", {}).get("type") == 7
+        ):
+            seat = action["userInput"].get("seat", 0)
+            stats[seat]["riichi"].add(current_kyoku)
+
+        # 5. 후로 (cpg.type in [2, 3, 5])
+        if (
+            action.get("type") == 2 and
+            action.get("userInput", {}).get("type") == 3 and
+            action["userInput"].get("cpg", {}).get("type") in [2, 3, 5]
+        ):
+            seat = action["userInput"].get("seat", 0)
+            stats[seat]["furo"].add(current_kyoku)
+
+        if (action["type"]) != 1:
+            prev_action = action
+
+    # 요약 결과
+    return {
+        "total_kyoku": current_kyoku,
+        "players": {
+            seat: {
+                "ron": len(stats[seat]["ron"]),
+                "tsumo": len(stats[seat]["tsumo"]),
+                "houju": len(stats[seat]["houju"]),
+                "riichi": len(stats[seat]["riichi"]),
+                "furo": len(stats[seat]["furo"]),
+                "hora": len(stats[seat]["ron"] | stats[seat]["tsumo"])
+            }
+            for seat in range(4)
+        }
+    }
 
 if __name__ == "__main__":
     asyncio.run(main())

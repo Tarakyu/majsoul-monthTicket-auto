@@ -5,6 +5,7 @@ from ms.protocol_pb2 import Wrapper
 
 
 class MSRPCChannel:
+
     def __init__(self, endpoint):
         self._endpoint = endpoint
         self._req_events = {}
@@ -57,7 +58,7 @@ class MSRPCChannel:
                 for hook in self._hooks.get(wrapper.name, []):
                     asyncio.create_task(hook(wrapper.data))
             elif type_byte == 3:  # RESPONSE
-                idx = int.from_bytes(msg[1:3], "little")
+                idx = int.from_bytes(msg[1:3], 'little')
                 if not idx in self._req_events:
                     continue
                 self._res[idx] = msg
@@ -68,7 +69,7 @@ class MSRPCChannel:
         self._new_req_idx = (self._new_req_idx + 1) % 60007
 
         wrapped = self.wrap(name, msg)
-        pkt = b"\x02" + idx.to_bytes(2, "little") + wrapped
+        pkt = b'\x02' + idx.to_bytes(2, 'little') + wrapped
 
         evt = asyncio.Event()
         self._req_events[idx] = evt
@@ -90,6 +91,7 @@ class MSRPCChannel:
 
 
 class MSRPCService:
+
     def __init__(self, channel):
         self._channel = channel
 
@@ -107,7 +109,7 @@ class MSRPCService:
 
     async def call_method(self, method, req):
         msg = req.SerializeToString()
-        name = ".{}.{}.{}".format(self.get_package_name(), self.get_service_name(), method)
+        name = '.{}.{}.{}'.format(self.get_package_name(), self.get_service_name(), method)
         res_msg = await self._channel.send_request(name, msg)
         res_class = self.get_res_class(method)
         res = res_class()
