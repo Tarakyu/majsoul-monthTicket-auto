@@ -133,7 +133,7 @@ async def login(lobby, version_to_force, accessTokenFromPassport):
 
     # await getMonthlyTicket(lobby)
 
-    req = pb.ReqFetchCustomizedContestGameRecords(unique_id=TOURNAMENT_ID, last_index=20)
+    req = pb.ReqFetchCustomizedContestGameRecords(unique_id=TOURNAMENT_ID)
     res = await lobby.fetch_customized_contest_game_records(req)
     res_dict = MessageToDict(res)
 
