@@ -17,6 +17,7 @@ from google.protobuf.json_format import MessageToJson
 from google.protobuf.json_format import MessageToDict
 from oauth2client.service_account import ServiceAccountCredentials
 
+from han_constants import HAN
 
 load_dotenv()
 uid = os.getenv("UID", "default_uid")
@@ -142,6 +143,7 @@ async def login(lobby, version_to_force, accessTokenFromPassport):
     data_sheet = connect_to_data_sheet()
     existing_uuids = get_existing_uuids(data_sheet)
     statistics_sheet = connect_to_statistics_sheet()
+    hules_sheet = connect_to_hules_sheet()
 
     new_rows = []
     for record in records:
@@ -152,10 +154,11 @@ async def login(lobby, version_to_force, accessTokenFromPassport):
 
     rows_to_append = []
     statistics_rows = []
+    hule_rows = []
     for r in new_rows:
         parsed_row, seat_map = parse_game_record(r[1])
         rows_to_append.append(parsed_row)
-        statistics = await get_game_statistics(lobby, r[1]["uuid"], version_to_force)
+        statistics, hules = await get_game_statistics(lobby, r[1]["uuid"], version_to_force)
         
         for seat in range(4):
             seat_stats = statistics["players"].get(seat, {})
@@ -173,11 +176,15 @@ async def login(lobby, version_to_force, accessTokenFromPassport):
                 seat_stats.get("chase_riichi", 0),
             ]
             statistics_rows.append(row)
+        for hule in hules:
+            row = [r[1]["uuid"], seat_map[hule[0]], hule[1], hule[2]]
+            hule_rows.append(row)
 
 
     if rows_to_append:
         data_sheet.append_rows(rows_to_append, value_input_option="USER_ENTERED")
         statistics_sheet.append_rows(statistics_rows, value_input_option="USER_ENTERED")
+        hules_sheet.append_rows(hule_rows, value_input_option="USER_ENTERED")
 
     print(f"총 {len(new_rows)}개의 새로운 게임 기록이 추가되었습니다.")
 
@@ -195,6 +202,13 @@ def connect_to_statistics_sheet():
     creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
     client = gspread.authorize(creds)
     sheet = client.open("카일색 대회전 기록지").worksheet("국 통계")
+    return sheet
+
+def connect_to_hules_sheet():
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+    client = gspread.authorize(creds)
+    sheet = client.open("카일색 대회전 기록지").worksheet("화료역")
     return sheet
 
 def format_time(ts):
@@ -249,18 +263,6 @@ def parse_game_record(record: dict) -> list:
     
     return row, seat_map
 
-
-async def getMonthlyTicket(lobby):
-    reqPayMonthTicket = pb.ReqCommon()
-    resPayMonthTicket = await lobby.pay_month_ticket(reqPayMonthTicket)
-
-    print(resPayMonthTicket)
-
-    reqFetchMonthTicketInfo = pb.ReqCommon()
-    resFetchMonthTicketInfo = await lobby.fetch_month_ticket_info(reqFetchMonthTicketInfo)
-
-    print(resFetchMonthTicketInfo)
-
 async def fetchGameRecordList(lobby):
     reqGameRecordList = pb.ReqGameRecordList()
     resGameRecordList = await lobby.fetch_game_record_list(reqGameRecordList)
@@ -271,46 +273,6 @@ async def fetchGameRecordList(lobby):
     with open("result.txt", "w", encoding="utf-8") as f:
         f.write(json_string)
 
-async def calculate_participants_statistics(lobby):
-    results = []
-    for account_id in account_nickname_map:
-        try:
-            request = pb.ReqAccountStatisticInfo(account_id=account_id)
-            response = await lobby.fetch_account_statistic_info(request)
-            parsed = MessageToDict(response)
-            stats_text = parse_statistics(account_id, parsed)
-            results.append(stats_text)
-        except Exception as e:
-            results.append(f"{account_nickname_map.get(account_id, account_id)}\n에러 발생: {e}\n")
-
-    results.append("---")
-    final_output = "\n".join(results)
-
-    with open("participants_statistics.txt", "w", encoding="utf-8") as f:
-        f.write(final_output)
-
-
-def parse_statistics(account_id: int, data: dict) -> str:
-
-    nickname = account_nickname_map.get(account_id, str(account_id))
-    stat_data = data.get("statisticData", [])
-    for entry in stat_data:
-        if entry.get("mahjongCategory") == 1 and entry.get("gameCategory") == 4:
-            recent = entry.get("statistic", {}).get("recentRound", {})
-            total = recent.get("totalCount", 0)
-            rong = recent.get("rongCount", 0)
-            zimo = recent.get("zimoCount", 0)
-            fangchong = recent.get("fangchongCount", 0)
-            print(account_id, nickname, total, rong, zimo, fangchong)
-
-            if total > 0:
-                hu_rate = (rong + zimo) / total * 100
-                fc_rate = fangchong / total * 100
-                return f"{nickname}\n화료율: {hu_rate:.0f}%\n방총률: {fc_rate:.0f}%\n"
-            else:
-                return f"{nickname}\n화료율: -\n방총률: -\n"
-    return f"{nickname}\n데이터 없음\n"
-
 async def get_game_statistics(lobby, uuid, version_to_force):
     req = pb.ReqGameRecord()
     req.game_uuid = uuid
@@ -319,13 +281,39 @@ async def get_game_statistics(lobby, uuid, version_to_force):
 
     record_wrapper = pb.Wrapper()
     record_wrapper.ParseFromString(res.data)
+    with open("./results/record_wrapper.txt", "w", encoding="utf-8") as f:
+        f.write(MessageToJson(record_wrapper))
 
     game_details = pb.GameDetailRecords()
     game_details.ParseFromString(record_wrapper.data)
+    with open("./results/game_details2.txt", "w", encoding="utf-8") as f:
+        f.write(MessageToJson(game_details))
 
     result = analyze_game_log(MessageToDict(game_details))
 
-    return result
+    ## 화료역 추가하는 코드
+    records = [action.result for action in game_details.actions if action.type == 1]
+
+    game_records_count = len(records)
+    logging.info("Found {} game records".format(game_records_count))
+
+    hules = []
+    round_record_wrapper = pb.Wrapper()
+
+    for i in range(0, game_records_count):
+        round_record_wrapper.ParseFromString(records[i])
+
+        if round_record_wrapper.name == ".lq.RecordHule":
+            record_hule = pb.RecordHule()
+            record_hule.ParseFromString(round_record_wrapper.data)
+            hule = MessageToDict(record_hule)["hules"][0]
+            for fan in hule["fans"]:
+                if "val" in fan:
+                    fan_id = fan["id"]
+                    fan_name = HAN.get(fan_id, f"알 수 없는 역({fan_id})")
+                    hules.append([hule.get("seat", 0), fan_name, fan.get("val", 0)])
+
+    return result, hules
 
 def analyze_game_log(log_json: dict) -> dict:
     actions = log_json.get("actions", [])
@@ -429,10 +417,48 @@ def analyze_game_log(log_json: dict) -> dict:
         }
     }
 
+async def load_and_process_game_log2(lobby, uuid, version_to_force):
+    logging.info("Loading game log")
 
-if __name__ == "__main__":
-    asyncio.run(main())
+    req = pb.ReqGameRecord()
+    req.game_uuid = uuid
+    req.client_version_string = f"web-{version_to_force}"
+    res = await lobby.fetch_game_record(req)
+
+    record_wrapper = pb.Wrapper()
+    record_wrapper.ParseFromString(res.data)
+
+    game_details = pb.GameDetailRecords()
+    game_details.ParseFromString(record_wrapper.data)
+
+    records = [action.result for action in game_details.actions if action.type == 1]
+
+    game_records_count = len(records)
+    logging.info("Found {} game records".format(game_records_count))
+
+    hules = []
+    round_record_wrapper = pb.Wrapper()
+
+    for i in range(0, game_records_count):
+        round_record_wrapper.ParseFromString(records[i])
+
+        if round_record_wrapper.name == ".lq.RecordHule":
+            record_hule = pb.RecordHule()
+            record_hule.ParseFromString(round_record_wrapper.data)
+            hule = MessageToDict(record_hule)["hules"][0]
+            for fan in hule["fans"]:
+                if "val" in fan:
+                    fan_id = fan["id"]
+                    fan_name = HAN.get(fan_id, f"알 수 없는 역({fan_id})")
+                    hules.append([hule.get("seat", 0), fan_name])
+
+    return res
 
 def print_data_as_json(data, type):
     json = MessageToJson(data)
     logging.info("{} json {}".format(type, json))
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+
