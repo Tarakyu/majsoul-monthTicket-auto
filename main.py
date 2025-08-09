@@ -281,13 +281,9 @@ async def get_game_statistics(lobby, uuid, version_to_force):
 
     record_wrapper = pb.Wrapper()
     record_wrapper.ParseFromString(res.data)
-    with open("./results/record_wrapper.txt", "w", encoding="utf-8") as f:
-        f.write(MessageToJson(record_wrapper))
 
     game_details = pb.GameDetailRecords()
     game_details.ParseFromString(record_wrapper.data)
-    with open("./results/game_details2.txt", "w", encoding="utf-8") as f:
-        f.write(MessageToJson(game_details))
 
     result = analyze_game_log(MessageToDict(game_details))
 
