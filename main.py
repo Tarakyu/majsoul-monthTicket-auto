@@ -53,7 +53,8 @@ async def connect():
             config = await res.json()
             logging.info(f"Config: {config}")
 
-            url = config["ip"][0]["region_urls"][0]["url"]
+            # url = config["ip"][0]["region_urls"][0]["url"]
+            url = "https://engame.mahjongsoul.com/api/v0/recommend_list"
             passport_url = config["yo_service_url"][0]
             print(passport_url)
 
