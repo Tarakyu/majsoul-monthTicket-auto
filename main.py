@@ -54,16 +54,18 @@ async def connect():
             logging.info(f"Config: {config}")
 
             # url = config["ip"][0]["region_urls"][0]["url"]
-            url = "https://engame.mahjongsoul.com/api/v0/recommend_list"
+            # url = "https://engame.mahjongsoul.com/api/v0/recommend_list"
+            url = config["ip"][0]["gateways"][0]["url"]
+            logging.info(f"url: {url}")
             passport_url = config["yo_service_url"][0]
-            print(passport_url)
+            logging.info(f"passport_url: {passport_url}")
 
-        async with session.get(url + "?service=ws-gateway&protocol=ws&ssl=true") as res:
-            servers = await res.json()
-            # mjjpgs.mahjongsoul.com:9663
+        async with session.get(url + "/api/clientgate/routes") as res:
+            json_data = await res.json()
+            servers = [route['domain'] for route in json_data['data']['routes']]
+
             logging.info(f"Available servers: {servers}")
 
-            servers = servers["servers"]
             server = random.choice(servers)
             endpoint = "wss://{}/gateway".format(server)
 
