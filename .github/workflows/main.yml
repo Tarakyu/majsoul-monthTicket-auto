@@ -2,7 +2,7 @@ name: Login to Majsoul
 
 on:
   schedule:
-    - cron: '*/5 * * * *'  # 매 5분마다
+    - cron: '0 21 * * *'  # 한국 새벽 6시
   workflow_dispatch:
 
 jobs:
