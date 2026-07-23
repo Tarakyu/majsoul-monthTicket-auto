@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import random
+import re
+import time
 import uuid
 import json
 import aiohttp
@@ -29,14 +31,60 @@ deviceId = f"web|{uid}"
 MS_HOST = "https://mahjongsoul.game.yo-star.com/"
 PASSPORT_HOST = "https://passport.mahjongsoul.com/"
 
+# EN(yo-star) 서버 기준 로그인 파라미터 (원본 최신 WebGL 로그인 방식)
+OAUTH_TYPE = 22
+SERVER_TAG = "en"
+CURRENCY_PLATFORMS = [1, 4, 5, 9, 12]
+# client_version_string 은 resource 버전을 쓴다 (productVersion 4.0.x 가 아님).
+# 작혼이 리소스를 올리면 이 값 갱신 필요. 브라우저 콘솔에서 test_sdk.Login 없이도
+# 로그인이 계속 되려면 실제 클라이언트가 쓰는 resource 버전과 일치해야 한다.
+RESOURCE_VERSION = os.getenv("MS_RESOURCE_VERSION", "0.16.212")
+DEVICE = {
+    "platform": "pc",
+    "hardware": "pc",
+    "os": "Windows",
+    "os_version": "Windows 10",
+    "is_browser": True,
+    "software": "Chrome",
+    "sale_platform": "web",
+    "hardware_vendor": "Google Inc.",
+    "model_number": "Chrome",
+    "screen_width": 1920,
+    "screen_height": 1080,
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+    "screen_type": 2,
+}
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+
+
+def _varint(n):
+    out = b""
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        out += bytes([b | (0x80 if n else 0)])
+        if not n:
+            return out
+
+
+def build_request_connection(route_id):
+    # ReqRequestConnection: type=1(field2), route_id=string(field3), timestamp(field4), platform="Web"(field6)
+    # 번들된 proto 는 route_id 가 uint32 라 문자열 route_id("en-1")를 못 담아 wire 를 직접 인코딩한다.
+    # 이 세션 확립(requestConnection)이 있어야 oauth2Auth 가 통과한다.
+    data = b"\x10" + _varint(1)
+    rid = route_id.encode()
+    data += b"\x1a" + bytes([len(rid)]) + rid
+    data += b"\x20" + _varint(int(time.time()))
+    data += b"\x32\x03Web"
+    return data
 
 
 async def main():
 
 
-    lobby, channel, version_to_force, accessTokenFromPassport = await connect()
-    await login(lobby, version_to_force, accessTokenFromPassport)
+    lobby, channel, client_version_string, product_version = await connect()
+    await login(lobby, client_version_string, product_version)
 
     await channel.close()
 
@@ -47,95 +95,105 @@ async def connect():
             version = await res.json()
             logging.info(f"Version: {version}")
             version = version["version"]
-            version_to_force = version.replace(".w", "")
+
+        # productVersion(index.html) 은 client_version.package 용, resource 버전은 별도(RESOURCE_VERSION).
+        # client_version_string = WebGL_2022-{resource} 이어야 oauth2Auth 가 통과한다.
+        async with session.get("{}index.html".format(MS_HOST)) as res:
+            index_html = await res.text()
+        match = re.search(r'productVersion\s*:\s*["\']([^"\']+)["\']', index_html)
+        product_version = match.group(1) if match else "0.0.0"
+        client_version_string = f"WebGL_2022-{RESOURCE_VERSION}"
+        logging.info(f"productVersion: {product_version}, resource: {RESOURCE_VERSION}, client_version_string: {client_version_string}")
 
         async with session.get("{}v{}/config.json".format(MS_HOST, version)) as res:
             config = await res.json()
             logging.info(f"Config: {config}")
 
-            # url = config["ip"][0]["region_urls"][0]["url"]
-            # url = "https://engame.mahjongsoul.com/api/v0/recommend_list"
             url = config["ip"][0]["gateways"][0]["url"]
             logging.info(f"url: {url}")
-            passport_url = config["yo_service_url"][0]
-            logging.info(f"passport_url: {passport_url}")
 
         async with session.get(url + "/api/clientgate/routes") as res:
             json_data = await res.json()
-            servers = [route['domain'] for route in json_data['data']['routes']]
+            routes = [r for r in json_data['data']['routes'] if r.get('id') and r.get('domain')]
 
-            logging.info(f"Available servers: {servers}")
+            logging.info(f"Available routes: {[(r['id'], r['domain']) for r in routes]}")
 
-            server = random.choice(servers)
-            endpoint = "wss://{}/gateway".format(server)
+            route = random.choice(routes)
+            endpoint = "wss://{}/gateway".format(route['domain'])
 
-        async with session.post(
-            passport_url + "/user/login/",
-            data={
-                "uid": uid,
-                "token": token,
-                "deviceId": deviceId,
-            },
-        ) as res:
-            passport = await res.json()
-            accessTokenFromPassport = passport["accessToken"]
-
-    logging.info(f"Chosen endpoint: {endpoint}")
+    logging.info(f"Chosen route: {route['id']} endpoint: {endpoint}")
     channel = MSRPCChannel(endpoint)
 
     lobby = Lobby(channel)
 
     await channel.connect(MS_HOST)
+
+    # 세션 확립: requestConnection(route_id 문자열) 이 선행되어야 oauth2Auth 가 통과한다.
+    await channel.send_request(".lq.Route.requestConnection", build_request_connection(route['id']))
     logging.info("Connection was established")
 
-    return lobby, channel, version_to_force, accessTokenFromPassport
+    return lobby, channel, client_version_string, product_version
 
 
-async def login(lobby, version_to_force, accessTokenFromPassport):
+async def login(lobby, client_version_string, product_version):
     logging.info("Login with username and password")
 
     heartBeat = pb.ReqHeatBeat()
     heartBeat.no_operation_counter = 1
     hbRes = await lobby.heatbeat(heartBeat)  # heartbeat는 로그인하기 전에 임의적으로 몇번 통신함
 
-    reqFromSoulLess = pb.ReqOauth2Auth()
-    reqFromSoulLess.type = 7
-    reqFromSoulLess.code = accessTokenFromPassport
-    reqFromSoulLess.uid = uid
-    reqFromSoulLess.client_version_string = f"web-{version_to_force}"
+    # oauth2Auth: passport 중간 로그인을 거치지 않고 사용자 TOKEN 을 code 로 직접 사용한다.
+    reqOauth2Auth = pb.ReqOauth2Auth()
+    reqOauth2Auth.type = OAUTH_TYPE
+    reqOauth2Auth.code = token
+    reqOauth2Auth.uid = uid
+    reqOauth2Auth.client_version_string = client_version_string
 
-    res = await lobby.oauth2_auth(reqFromSoulLess)
+    res = await lobby.oauth2_auth(reqOauth2Auth)
 
-    token = res.access_token
-    if not token:
-        logging.error("Login Error:")
-        logging.error(res)
+    access_token = res.access_token
+    if not access_token:
+        err_code = res.error.code if res.HasField("error") else None
+        logging.error(f"Login Error (oauth2Auth): {res}")
+        if err_code == 151:
+            logging.error(
+                "code 151: client_version_string 이 작혼 클라이언트의 최신 resource 버전과 "
+                f"맞지 않을 때 발생합니다 (현재 사용값: {client_version_string}).\n"
+                "  1) 브라우저에서 작혼(EN) 로그인 후 개발자도구 콘솔에 다음을 실행:\n"
+                "       GameMgr.Inst.client_version_string   (예: 'WebGL_2022-0.16.212')\n"
+                "  2) 출력의 'WebGL_2022-' 뒤 숫자(resource 버전)를 MS_RESOURCE_VERSION 환경변수/Secret 에 설정\n"
+                "     (예: MS_RESOURCE_VERSION=0.16.212)"
+            )
         return False
 
-    # reqOauth2Check = pb.ReqOauth2Check()
-    # reqOauth2Check.type = 7
-    # reqOauth2Check.access_token = token
-    # resOauth2Check = await lobby.oauth2_check(reqOauth2Check)
-    # print(resOauth2Check)
-    # if not resOauth2Check.has_account:
-    #     print("Invalid access token")
-    #     return False
+    reqOauth2Check = pb.ReqOauth2Check()
+    reqOauth2Check.type = OAUTH_TYPE
+    reqOauth2Check.access_token = access_token
+    resOauth2Check = await lobby.oauth2_check(reqOauth2Check)
+    if not resOauth2Check.has_account:
+        logging.error("Login Error: access token 에 연결된 계정이 없습니다")
+        logging.error(resOauth2Check)
+        return False
 
     reqOauth2Login = pb.ReqOauth2Login()
-    reqOauth2Login.type = 7
-    reqOauth2Login.access_token = token
-
+    reqOauth2Login.type = OAUTH_TYPE
+    reqOauth2Login.access_token = access_token
     reqOauth2Login.reconnect = False
-    reqOauth2Login.device.is_browser = True
-    uuid_key = str(uuid.uuid1())
-    reqOauth2Login.random_key = uuid_key
-    reqOauth2Login.client_version_string = f"web-{version_to_force}"
+    reqOauth2Login.device.CopyFrom(pb.ClientDeviceInfo(**DEVICE))
+    reqOauth2Login.random_key = str(uuid.uuid1())
+    reqOauth2Login.client_version.CopyFrom(
+        pb.ClientVersionInfo(resource=RESOURCE_VERSION, package=product_version)
+    )
+    reqOauth2Login.client_version_string = client_version_string
     reqOauth2Login.gen_access_token = False
-    reqOauth2Login.currency_platforms.append(2)
+    for currency_platform in CURRENCY_PLATFORMS:
+        reqOauth2Login.currency_platforms.append(currency_platform)
+    reqOauth2Login.tag = SERVER_TAG
 
     resOauth2Login = await lobby.oauth2_login(reqOauth2Login)
 
-    # await getMonthlyTicket(lobby)
+    # 일일 월정액권(월간패스) 보상 수령
+    await getMonthlyTicket(lobby)
 
     req = pb.ReqFetchCustomizedContestGameRecords(unique_id=TOURNAMENT_ID)
     res = await lobby.fetch_customized_contest_game_records(req)
@@ -161,7 +219,7 @@ async def login(lobby, version_to_force, accessTokenFromPassport):
     for r in new_rows:
         parsed_row, seat_map = parse_game_record(r[1])
         rows_to_append.append(parsed_row)
-        statistics, hules = await get_game_statistics(lobby, r[1]["uuid"], version_to_force)
+        statistics, hules = await get_game_statistics(lobby, r[1]["uuid"], client_version_string)
         
         for seat in range(4):
             seat_stats = statistics["players"].get(seat, {})
@@ -192,6 +250,15 @@ async def login(lobby, version_to_force, accessTokenFromPassport):
     print(f"총 {len(new_rows)}개의 새로운 게임 기록이 추가되었습니다.")
 
     return True
+
+
+async def getMonthlyTicket(lobby):
+    # payMonthTicket: 오늘자 월정액권(월간패스) 보상을 수령한다. 이미 받았으면 에러 코드가 돌아오지만 무시한다.
+    resPay = await lobby.pay_month_ticket(pb.ReqCommon())
+    logging.info(f"payMonthTicket: {MessageToDict(resPay)}")
+
+    resInfo = await lobby.fetch_month_ticket_info(pb.ReqCommon())
+    logging.info(f"fetchMonthTicketInfo: {MessageToDict(resInfo)}")
 
 def connect_to_data_sheet():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -276,10 +343,10 @@ async def fetchGameRecordList(lobby):
     with open("result.txt", "w", encoding="utf-8") as f:
         f.write(json_string)
 
-async def get_game_statistics(lobby, uuid, version_to_force):
+async def get_game_statistics(lobby, uuid, client_version_string):
     req = pb.ReqGameRecord()
     req.game_uuid = uuid
-    req.client_version_string = f"web-{version_to_force}"
+    req.client_version_string = client_version_string
     res = await lobby.fetch_game_record(req)
 
     record_wrapper = pb.Wrapper()
