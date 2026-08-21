@@ -2,6 +2,7 @@ import asyncio
 import logging
 import random
 import re
+import sys
 import time
 import uuid
 import json
@@ -36,9 +37,12 @@ OAUTH_TYPE = 22
 SERVER_TAG = "en"
 CURRENCY_PLATFORMS = [1, 4, 5, 9, 12]
 # client_version_string 은 resource 버전을 쓴다 (productVersion 4.0.x 가 아님).
-# 작혼이 리소스를 올리면 이 값 갱신 필요. 브라우저 콘솔에서 test_sdk.Login 없이도
-# 로그인이 계속 되려면 실제 클라이언트가 쓰는 resource 버전과 일치해야 한다.
-RESOURCE_VERSION = os.getenv("MS_RESOURCE_VERSION", "0.16.212")
+# 예전엔 resource가 productVersion과 별도 스킴(0.16.x)이었지만, 작혼이 이후 resource를
+# productVersion에 통합해서 resource==productVersion인 상태다. MS_RESOURCE_VERSION을
+# 명시하면 그 값을 강제하고, 없으면 매 연결마다 index.html에서 읽은 실시간 productVersion을
+# 그대로 쓴다 (하드코딩값은 작혼이 리소스를 올릴 때마다 다시 깨진다 — 2026-08-20에 재발해서
+# 매 5분 cron이 조용히 계속 실패하고 있었음).
+RESOURCE_VERSION_OVERRIDE = os.getenv("MS_RESOURCE_VERSION")
 DEVICE = {
     "platform": "pc",
     "hardware": "pc",
@@ -81,12 +85,11 @@ def build_request_connection(route_id):
 
 
 async def main():
-
-
     lobby, channel, client_version_string, product_version = await connect()
-    await login(lobby, client_version_string, product_version)
-
-    await channel.close()
+    try:
+        return await login(lobby, client_version_string, product_version)
+    finally:
+        await channel.close()
 
 
 async def connect():
@@ -102,8 +105,9 @@ async def connect():
             index_html = await res.text()
         match = re.search(r'productVersion\s*:\s*["\']([^"\']+)["\']', index_html)
         product_version = match.group(1) if match else "0.0.0"
-        client_version_string = f"WebGL_2022-{RESOURCE_VERSION}"
-        logging.info(f"productVersion: {product_version}, resource: {RESOURCE_VERSION}, client_version_string: {client_version_string}")
+        resource_version = RESOURCE_VERSION_OVERRIDE or product_version
+        client_version_string = f"WebGL_2022-{resource_version}"
+        logging.info(f"productVersion: {product_version}, resource: {resource_version}, client_version_string: {client_version_string}")
 
         async with session.get("{}v{}/config.json".format(MS_HOST, version)) as res:
             config = await res.json()
@@ -182,7 +186,7 @@ async def login(lobby, client_version_string, product_version):
     reqOauth2Login.device.CopyFrom(pb.ClientDeviceInfo(**DEVICE))
     reqOauth2Login.random_key = str(uuid.uuid1())
     reqOauth2Login.client_version.CopyFrom(
-        pb.ClientVersionInfo(resource=RESOURCE_VERSION, package=product_version)
+        pb.ClientVersionInfo(resource=RESOURCE_VERSION_OVERRIDE or product_version, package=product_version)
     )
     reqOauth2Login.client_version_string = client_version_string
     reqOauth2Login.gen_access_token = False
@@ -525,6 +529,9 @@ def print_data_as_json(data, type):
     logging.info("{} json {}".format(type, json))
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    result = asyncio.run(main())
+    if not result:
+        logging.error("main() failed — exiting with non-zero status so CI reflects the real outcome")
+        sys.exit(1)
 
 
